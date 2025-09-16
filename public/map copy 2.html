@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Delivery Route Optimization</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            font-family: Arial, sans-serif;
+        }
+
+        #mapContainer {
+            display: flex;
+            height: calc(100vh - 60px);
+            /* Adjust for download button */
+        }
+
+        #map {
+            flex-grow: 1;
+            height: 100%;
+            position: relative;
+        }
+
+        #sidebar {
+            width: 0;
+            background-color: #f8f9fa;
+            overflow-x: hidden;
+            transition: 0.3s;
+            padding-top: 20px;
+            box-shadow: -2px 0 5px rgba(0, 0, 0, 0.1);
+            z-index: 1000;
+        }
+
+        #sidebarContent {
+            padding: 20px;
+        }
+
+        #clusterNavigationContainer {
+        position: fixed;
+        top: 10px;
+        left: 0;
+        right: 0;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        background-color: rgba(255, 255, 255, 0.8);
+        padding: 5px 10px;
+        z-index: 1000;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+       }
+
+        #clusterButtonsContainer {
+            display: flex;
+            flex-wrap: nowrap;
+            gap: 5px;
+            overflow-x: hidden;
+            max-width: 80vw;
+        }
+
+        .cluster-button {
+            padding: 8px 12px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            white-space: nowrap;
+            font-weight: bold;
+            min-width: 80px;
+            text-align: center;
+        }
+        .cluster-button:hover {
+            background-color: #0056b3;
+        }
+        
+        .cluster-button.active {
+            background-color: #28a745;
+        }
+  
+        .nav-arrow {
+            padding: 8px 15px;
+            background-color: #343a40;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 16px;
+            margin: 0 10px;
+        }
+        
+        .nav-arrow:hover {
+            background-color: #23272b;
+        }
+        
+        .nav-arrow:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        
+        .page-indicator {
+            margin-left: 10px;
+            font-weight: bold;
+            color: #343a40;
+        }
+
+        #sidebarCloseBtn {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: none;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+        }
+
+        .cluster-detail-item {
+            margin-bottom: 10px;
+            padding: 10px;
+            background-color: #f1f3f5;
+            border-radius: 5px;
+        }
+
+        #downloadButtonContainer {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            display: flex;
+            justify-content: center;
+            padding: 10px;
+            background-color: rgba(255, 255, 255, 0.8);
+            z-index: 1000;
+        }
+
+        #download-btn {
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+
+        #download-btn:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="mapContainer">
+        <div id="map"></div>
+        <div id="sidebar">
+            <button id="sidebarCloseBtn">&times;</button>
+            <div id="sidebarContent"></div>
+        </div>
+    </div>
+
+    <div id="clusterNavigationContainer">
+        <button id="prevPage" class="nav-arrow">&lt;</button>
+        <div id="clusterButtonsContainer"></div>
+        <button id="nextPage" class="nav-arrow">&gt;</button>
+      </div>
+
+    <div id="downloadButtonContainer">
+        <button id="download-btn">Download Optimized CSV</button>
+    </div>
+
+    <script>
+        let map;
+        let markerLayers = [];
+        let routeLayers = [];
+        let clusters = [];
+
+        let currentPageIndex = 0;
+        const clustersPerPage = 10;
+
+        function initClusterNavigation(clusters) {
+            const totalPages = Math.ceil(clusters.length / clustersPerPage);
+            const prevButton = document.getElementById('prevPage');
+            const nextButton = document.getElementById('nextPage');
+            
+            // Add event listeners for navigation
+            prevButton.addEventListener('click', () => {
+            if (currentPageIndex > 0) {
+                currentPageIndex--;
+                renderClusterPage();
+            }
+            });
+            
+            nextButton.addEventListener('click', () => {
+            if (currentPageIndex < totalPages - 1) {
+                currentPageIndex++;
+                renderClusterPage();
+           }
+       });
+    
+    function renderClusterPage() {
+      const container = document.getElementById('clusterButtonsContainer');
+      container.innerHTML = '';
+      
+      // Calculate page range
+      const startIdx = currentPageIndex * clustersPerPage;
+      const endIdx = Math.min(startIdx + clustersPerPage, clusters.length);
+      
+      // Create page indicator
+      const pageIndicator = document.createElement('div');
+      pageIndicator.classList.add('page-indicator');
+      pageIndicator.textContent = `Page ${currentPageIndex + 1}/${totalPages}`;
+      container.appendChild(pageIndicator);
+      
+      // Create cluster buttons for this page
+      for (let i = startIdx; i < endIdx; i++) {
+        const cluster = clusters[i];
+        const button = document.createElement('button');
+        button.classList.add('cluster-button');
+        button.textContent = `Cluster ${cluster.clusterId}`;
+        button.addEventListener('click', () => {
+          // Remove active class from all buttons
+          document.querySelectorAll('.cluster-button').forEach(btn => {
+            btn.classList.remove('active');
+          });
+          
+          // Add active class to clicked button
+          button.classList.add('active');
+          
+          // Show this cluster on the map
+          toggleClusterVisibility(i);
+        });
+        container.appendChild(button);
+      }
+      
+      // Update button states
+      prevButton.disabled = currentPageIndex === 0;
+      nextButton.disabled = currentPageIndex === totalPages - 1;
+    }
+    
+    // Initial render
+    renderClusterPage();
+  }
+
+        function initMap() {
+            map = L.map('map').setView([20.5937, 78.9629], 5);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenStreetMap contributors'
+            }).addTo(map);
+
+            fetch('/get-optimized-clusters')
+                .then(response => response.json())
+                .then(data => {
+                    clusters = data.clusters;
+                    displayClusters(clusters);
+
+                    initClusterNavigation(clusters);
+                })
+                .catch(error => console.error('Error fetching clusters:', error));
+
+            // Add download button event listener
+            document.getElementById('download-btn').addEventListener('click', function () {
+                fetch('/download-optimized-csv')
+                    .then(response => {
+                        if (!response.ok) {
+                            throw new Error('Network response was not ok');
+                        }
+                        return response.blob();
+                    })
+                    .then(blob => {
+                        // Create a link element, use it to download the blob, then remove it
+                        const url = window.URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.style.display = 'none';
+                        a.href = url;
+                        a.download = 'optimized_deliveries.csv';
+                        document.body.appendChild(a);
+                        a.click();
+                        window.URL.revokeObjectURL(url);
+                    })
+                    .catch(error => {
+                        console.error('Download error:', error);
+                        alert('Error downloading the CSV file');
+                    });
+            });
+        }
+
+        function getUniqueClusterColor(clusterIndex) {
+            const colors = [
+                '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0',
+                '#9966FF', '#FF9F40', '#FF5733', '#33FF57',
+                '#3357FF', '#FF33F6', '#33FFF6', '#F6FF33'
+            ];
+            return colors[clusterIndex % colors.length];
+        }
+
+    function fetchRoadRoute(coordinates, retries = 3, delay = 1000) {
+            const osrmEndpoint = 'https://router.project-osrm.org/route/v1/driving/';
+            const coordinatesStr = coordinates.map(coord => `${coord[0]},${coord[1]}`).join(';');
+    
+       return new Promise((resolve, reject) => {
+        const attemptFetch = (retriesLeft) => {
+            fetch(`${osrmEndpoint}${coordinatesStr}?overview=full&geometries=geojson`)
+                .then(response => {
+                    if (response.status === 429 && retriesLeft > 0) {
+                        // If too many requests and we have retries left, wait and try again
+                        console.log(`Rate limited, retrying in ${delay}ms... (${retriesLeft} retries left)`);
+                        setTimeout(() => attemptFetch(retriesLeft - 1), delay);
+                    } else if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    } else {
+                        return response.json();
+                    }
+                })
+                .then(data => {
+                    if (data && data.routes && data.routes.length > 0) {
+                        resolve({
+                            coordinates: data.routes[0].geometry.coordinates,
+                            distance: data.routes[0].distance / 1000 // Convert to kilometers
+                        });
+                    } else {
+                        reject(new Error('No route found'));
+                    }
+                })
+                .catch(error => {
+                    if (retriesLeft > 0 && error.message.includes('429')) {
+                        // Retry on specific errors related to rate limiting
+                        setTimeout(() => attemptFetch(retriesLeft - 1), delay);
+                    } else {
+                        reject(error);
+                    }
+                });
+        };
+        
+        attemptFetch(retries);
+    });
+}
+
+
+function processRoutesWithDelay(cluster, deliveries, routeIndex, clusterLayerGroup, clusterColor) {
+    return new Promise((resolve, reject) => {
+        if (routeIndex >= deliveries.length) {
+            resolve(); // All routes processed
+            return;
+        }
+
+        const currentDelivery = deliveries[routeIndex];
+        let routeCoordinates;
+
+        // Handle case with a single origin
+        if (deliveries.length === 1) {
+            routeCoordinates = [
+                [cluster.allOriginCoordinates[0].lng, cluster.allOriginCoordinates[0].lat], // Single origin
+                [currentDelivery.coordinates.lng, currentDelivery.coordinates.lat], // Destination
+            ];
+        }
+        // First iteration: From cluster's main origin to the first origin
+        else if (routeIndex === 0) {
+            routeCoordinates = [
+                [cluster.originCoordinates.lng, cluster.originCoordinates.lat], // Cluster's main origin
+                [cluster.allOriginCoordinates[routeIndex].lng, cluster.allOriginCoordinates[routeIndex].lat], // First origin
+            ];
+        }
+        // Last iteration: From the last origin to the destination
+        else if (routeIndex === deliveries.length - 1) {
+            routeCoordinates = [
+                [cluster.allOriginCoordinates[routeIndex].lng, cluster.allOriginCoordinates[routeIndex].lat], // Last origin
+                [currentDelivery.coordinates.lng, currentDelivery.coordinates.lat], // Delivery destination
+            ];
+        }
+        // Intermediate iterations: Between consecutive origins
+        else {
+            routeCoordinates = [
+                [cluster.allOriginCoordinates[routeIndex].lng, cluster.allOriginCoordinates[routeIndex].lat], // Current origin
+                [cluster.allOriginCoordinates[routeIndex + 1].lng, cluster.allOriginCoordinates[routeIndex + 1].lat], // Next origin
+            ];
+        }
+
+        console.log(`Processing route ${routeIndex + 1}/${deliveries.length} for Cluster ${cluster.clusterId}`);
+        
+        // Add a delay between route requests to avoid rate limiting
+        const requestDelay = routeIndex > 0 ? 1000 : 0; // No delay for the first request
+        
+        setTimeout(() => {
+            fetchRoadRoute(routeCoordinates)
+                .then((routeData) => {
+                    const routeLayer = L.geoJSON(
+                        { type: 'LineString', coordinates: routeData.coordinates },
+                        {
+                            style: {
+                                color: clusterColor,
+                                weight: 5,
+                                opacity: 0.7,
+                            },
+                        }
+                    )
+                        .bindTooltip(
+                            `Cluster ID: ${cluster.clusterId}<br>Route Distance: ${routeData.distance.toFixed(2)} km`,
+                            { permanent: false, direction: 'top', className: 'route-tooltip' }
+                        )
+                        .addTo(clusterLayerGroup);
+
+                    routeLayers.push(routeLayer);
+
+                    // Accumulate total route distance
+                    cluster.totalRouteDistance = (cluster.totalRouteDistance || 0) + routeData.distance;
+
+                    // Process the next route after a delay
+                    processRoutesWithDelay(cluster, deliveries, routeIndex + 1, clusterLayerGroup, clusterColor)
+                        .then(resolve)
+                        .catch(reject);
+                })
+                .catch((error) => {
+                    console.error(`Error fetching route ${routeIndex + 1}:`, error);
+                    // Continue with the next route even if there's an error
+                    processRoutesWithDelay(cluster, deliveries, routeIndex + 1, clusterLayerGroup, clusterColor)
+                        .then(resolve)
+                        .catch(reject);
+                 });
+           }, requestDelay);
+        });
+      }
+
+     function displayClusters(clusters) {
+              // Process each cluster one at a time
+               processClusterSequentially(clusters, 0);
+
+               document.getElementById('sidebarCloseBtn').addEventListener('click', closeSidebar);
+    }
+
+    function processClusterSequentially(clusters, clusterIndex) {
+    // Base case: if we've processed all clusters, we're done
+        if (clusterIndex >= clusters.length) {
+            return;
+        }
+
+        const cluster = clusters[clusterIndex];
+        const clustersInfoDiv = document.getElementById('clustersInfo');
+
+        // Calculate total weight and volume for the cluster
+        const totalWeight = cluster.deliveries.reduce((sum, delivery) => sum + (delivery.weight || 0), 0);
+        const totalVolume = cluster.deliveries.reduce((sum, delivery) => sum + (delivery.volume || 0), 0);
+
+        // Store these values in the cluster object for later use
+        cluster.totalWeight = totalWeight;
+        cluster.totalVolume = totalVolume;
+
+        const clusterLayerGroup = L.layerGroup().addTo(map);
+        markerLayers.push(clusterLayerGroup);
+
+        // Get unique color for the entire cluster
+        const clusterColor = getUniqueClusterColor(clusterIndex);
+
+        // Sort deliveries by stop order
+        const sortedDeliveries = [...cluster.deliveries].sort((a, b) => a.stopOrder - b.stopOrder);
+
+    // Add origin markers for each delivery in sortedDeliveries
+        sortedDeliveries.forEach((delivery, index) => {
+            L.marker(
+                [cluster.allOriginCoordinates[index].lat, cluster.allOriginCoordinates[index].lng],
+                {
+                    icon: L.icon({
+                        iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-green.png',
+                        shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png'
+                    })
+                }
+            )
+                .bindTooltip(
+                    `Cluster ID: ${cluster.clusterId}<br>Origin Pincode: ${delivery.originPincode} - Origin ${index + 1}`,
+                    {
+                        permanent: false,
+                        direction: 'top',
+                        className: 'marker-label'
+                    }
+                )
+                .addTo(clusterLayerGroup);
+        });
+
+    // Add destination markers for all deliveries
+        cluster.deliveries.forEach(delivery => {
+            L.circleMarker([delivery.coordinates.lat, delivery.coordinates.lng], {
+                radius: 10,
+                fillColor: 'red',
+                color: '#000',
+                weight: 1,
+                opacity: 1,
+                fillOpacity: 0.8
+            })
+                .bindTooltip(
+                    `Delivery ID: ${delivery.deliveryId}<br>Destination Pincode: ${delivery.destinationPincode}<br>Drop Sequence: ${delivery.stopOrder}`,
+                    {
+                        permanent: false,
+                        direction: 'top',
+                        className: 'marker-label'
+                    }
+                )
+                .addTo(clusterLayerGroup);
+        });
+
+       // Global variable to track cluster route details
+       cluster.totalRouteDistance = 0;
+
+    // Process routes with delay between requests
+    processRoutesWithDelay(cluster, sortedDeliveries, 0, clusterLayerGroup, clusterColor)
+        .then(() => {
+            // Process the next cluster after completing this one
+            processClusterSequentially(clusters, clusterIndex + 1);
+        })
+        .catch(error => {
+            console.error('Error processing routes:', error);
+            // Continue with next cluster even if there's an error
+            processClusterSequentially(clusters, clusterIndex + 1);
+        });
+     }
+
+        function toggleClusterVisibility(selectedClusterIndex) {
+            // Hide all clusters first
+            markerLayers.forEach((layer, index) => {
+                layer.removeFrom(map);
+            });
+
+            // Show only the selected cluster
+            markerLayers[selectedClusterIndex].addTo(map);
+
+            // Show selected cluster details in sidebar
+            showClusterDetails(clusters[selectedClusterIndex], selectedClusterIndex);
+        }
+
+        function showClusterDetails(cluster, clusterIndex) {
+            const sidebar = document.getElementById('sidebar');
+            const sidebarContent = document.getElementById('sidebarContent');
+
+            sidebar.style.width = '350px';
+
+            const sortedDeliveries = [...cluster.deliveries].sort((a, b) => a.stopOrder - b.stopOrder);
+
+            sidebarContent.innerHTML = `
+                <h2>Cluster ${cluster.clusterId} Details</h2>
+                <div class="cluster-detail-item">
+                    <strong>Selected Vehicle:</strong> ${cluster.selectedTruck}
+                </div>
+                <div class="cluster-detail-item">
+                    <strong>Total Route Distance:</strong> ${cluster.totalRouteDistance.toFixed(2)} km
+                </div>
+                <div class="cluster-detail-item">
+                    <strong>Total Weight:</strong> ${cluster.totalWeight.toFixed(2)} kg
+                </div>
+                <div class="cluster-detail-item">
+                    <strong>Total Volume:</strong> ${cluster.totalVolume.toFixed(2)} cft
+                </div>
+                <div class="cluster-detail-item">
+                    <h3>Delivery Sequence</h3>
+                    <ul>
+                        ${sortedDeliveries.map(delivery => `
+                            <li>
+                                <strong>Delivery ID:</strong> ${delivery.deliveryId} <br>
+                                <strong>Destination Pincode:</strong> ${delivery.destinationPincode} <br>
+                                <strong>Drop Sequence:</strong> ${delivery.stopOrder}
+                            </li>
+                        `).join('')}
+                    </ul>
+                </div>
+            `;
+        }
+
+        function closeSidebar() {
+            const sidebar = document.getElementById('sidebar');
+            sidebar.style.width = '0';
+
+            // Restore visibility of all clusters
+            markerLayers.forEach(layer => {
+                layer.addTo(map);
+            });
+        }
+
+        initMap();
+    </script>
+</body>
+
+</html>

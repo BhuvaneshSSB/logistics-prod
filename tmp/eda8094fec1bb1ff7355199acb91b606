@@ -1,0 +1,6 @@
+Vehicle Type,Length(ft),Width(ft),Height(ft),Volume(CFT),Capacity(kg)
+TATA ACE,7,4.8,4.8,161.25,850
+TATA_407_FC,9,6,5,270,2500
+17FT_FC,17,6.8,6,693.6,5000
+20FT_SXL_FC,20,8,8,1280,7500
+32FT_SXL_FC_9MT,32,8,8.5,1690,9000
