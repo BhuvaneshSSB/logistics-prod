@@ -550,90 +550,132 @@ async function createGeographicalClusters(deliveries) {
   console.log("Creating geographical clusters for", deliveries.length, "deliveries");
   const clusters = [];
   let clusterIdCounter = 1;
-  const batchSize = 10; // Process in batches of 10
+  const batchSize = 10;
   
-  // Preload coordinates in batches
+  // Preload all coordinates first
+  const deliveriesWithCoords = [];
+  
   for (let i = 0; i < deliveries.length; i += batchSize) {
     const batch = deliveries.slice(i, i + batchSize);
     const coordPromises = batch.map(async (delivery) => {
-      const originCoords = await getCoordinates(delivery["Origin Pincode"]);
-      const destinationCoords = await getCoordinates(delivery["Destination Pincode"]);
-      return { delivery, originCoords, destinationCoords };
+      try {
+        const originCoords = await getCoordinates(delivery["Origin Pincode"]);
+        const destinationCoords = await getCoordinates(delivery["Destination Pincode"]);
+        
+        if (!originCoords || !destinationCoords) {
+          console.error(`Could not fetch coordinates for delivery: ${delivery.delivery_id}`);
+          return null;
+        }
+        
+        return {
+          ...delivery,
+          originCoordinates: originCoords,
+          destinationCoordinates: destinationCoords,
+          coordinates: destinationCoords // For backward compatibility
+        };
+      } catch (error) {
+        console.error(`Error fetching coordinates for delivery ${delivery.delivery_id}:`, error.message);
+        return null;
+      }
     });
     
     const results = await Promise.allSettled(coordPromises);
+    const successfulDeliveries = results
+      .filter(result => result.status === 'fulfilled' && result.value !== null)
+      .map(result => result.value);
     
-    for (const result of results) {
-      if (result.status === 'fulfilled') {
-        const { delivery, originCoords, destinationCoords } = result.value;
+    deliveriesWithCoords.push(...successfulDeliveries);
+    
+    // Add delay between batches
+    if (i + batchSize < deliveries.length) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  }
+  
+  console.log(`Successfully loaded coordinates for ${deliveriesWithCoords.length} deliveries`);
+  
+  // Sort deliveries by origin pincode to group nearby origins
+  deliveriesWithCoords.sort((a, b) => a["Origin Pincode"] - b["Origin Pincode"]);
+  
+  // Create clusters based on origin proximity and destination proximity
+  for (const delivery of deliveriesWithCoords) {
+    let addedToExistingCluster = false;
+    
+    for (const cluster of clusters) {
+      try {
+        // Check origin proximity
+        const originDistance = await getRoadRouteDistance(
+          cluster.originCoordinates, 
+          delivery.originCoordinates,
+          delivery["Origin Pincode"]
+        );
         
-        if (!originCoords || !destinationCoords) {
-          console.error(`Could not fetch coordinates for pincode: ${delivery["Origin Pincode"]} or ${delivery["Destination Pincode"]}`);
-          continue;
+        const originDistanceValue = originDistance !== null ? 
+          originDistance : 
+          calculateDistance(cluster.originCoordinates, delivery.originCoordinates);
+        
+        // Check if any destination in cluster is close to this delivery's destination
+        let minDestinationDistance = Infinity;
+        for (const clusterDelivery of cluster.deliveries) {
+          const destDistance = await getRoadRouteDistance(
+            clusterDelivery.destinationCoordinates,
+            delivery.destinationCoordinates,
+            delivery["Origin Pincode"] // Using origin pincode for cache key
+          );
+          
+          const destDistanceValue = destDistance !== null ?
+            destDistance :
+            calculateDistance(clusterDelivery.destinationCoordinates, delivery.destinationCoordinates);
+          
+          minDestinationDistance = Math.min(minDestinationDistance, destDistanceValue);
         }
         
-        delivery.coordinates = destinationCoords;
-        let addedToExistingCluster = false;
+        // Dynamic clustering thresholds
+        const originRadius = 50; // km - maximum origin distance
+        const destinationRadius = 30; // km - maximum destination spread
         
-        // Try to add to existing clusters
-        for (const cluster of clusters) {
-          try {
-            // FIRST check if destination pincodes match
-            const isSameDestination = cluster.deliveries[0]["Destination Pincode"] === delivery["Destination Pincode"];
+        // Check if both origin and destination are within acceptable distances
+        if (originDistanceValue <= originRadius && minDestinationDistance <= destinationRadius) {
+          // Check capacity constraints before adding
+          const newTotalVolume = cluster.totalVolume + delivery.TotalVolume;
+          const newTotalWeight = cluster.totalWeight + delivery.TotalWeight;
+          
+          if (newTotalVolume <= 1600 && newTotalWeight <= 14000) {
+            cluster.deliveries.push(delivery);
+            cluster.originCoordinatesList.push(delivery.originCoordinates);
+            cluster.totalVolume = newTotalVolume;
+            cluster.totalWeight = newTotalWeight;
             
-            if (!isSameDestination) {
-              continue; // Skip if destinations don't match
+            // Update cluster's destination coordinates to be the centroid of all destinations
+            if (cluster.deliveries.length > 1) {
+              const avgLat = cluster.deliveries.reduce((sum, d) => sum + d.destinationCoordinates.lat, 0) / cluster.deliveries.length;
+              const avgLng = cluster.deliveries.reduce((sum, d) => sum + d.destinationCoordinates.lng, 0) / cluster.deliveries.length;
+              cluster.destinationCoordinates = { lat: avgLat, lng: avgLng };
             }
             
-            // Then check origin proximity
-            let originRouteDistance = await getRoadRouteDistance(cluster.originCoordinates, originCoords);
-            
-            if (originRouteDistance === null) {
-              originRouteDistance = calculateDistance(cluster.originCoordinates, originCoords);
-            }
-            
-            const spread = calculateSpread(cluster);
-            const spreadFactor = spread > 20 ? 2 : 1;
-            const dynamicRadius = Math.sqrt(cluster.totalVolume) * 1.5 + cluster.deliveries.length * 3 * spreadFactor;
-            
-            if (originRouteDistance <= dynamicRadius) {
-              cluster.deliveries.push(delivery);
-              cluster.originCoordinatesList.push(originCoords);
-              
-              // Update cluster totals
-              cluster.totalVolume += delivery.TotalVolume;
-              cluster.totalWeight += delivery.TotalWeight;
-              
-              delivery.cluster_id = cluster.id;
-              addedToExistingCluster = true;
-              break;
-            }
-          } catch (error) {
-            console.error("Error during cluster assignment:", error.message);
-            continue;
+            delivery.cluster_id = cluster.id;
+            addedToExistingCluster = true;
+            break;
           }
         }
-        
-        // Create new cluster if not added to existing one
-        if (!addedToExistingCluster) {
-          const newCluster = {
-            id: clusterIdCounter++,
-            originCoordinates: originCoords,
-            originCoordinatesList: [originCoords],
-            destinationCoordinates: destinationCoords,
-            deliveries: [delivery],
-            totalVolume: delivery.TotalVolume,
-            totalWeight: delivery.TotalWeight,
-          };
-          clusters.push(newCluster);
-          delivery.cluster_id = newCluster.id;
-        }
+      } catch (error) {
+        console.error("Error during cluster assignment:", error.message);
+        continue;
       }
     }
     
-    // Add a small delay between batches
-    if (i + batchSize < deliveries.length) {
-      await new Promise(resolve => setTimeout(resolve, 500));
+    if (!addedToExistingCluster) {
+      const newCluster = {
+        id: clusterIdCounter++,
+        originCoordinates: delivery.originCoordinates,
+        originCoordinatesList: [delivery.originCoordinates],
+        destinationCoordinates: delivery.destinationCoordinates,
+        deliveries: [delivery],
+        totalVolume: delivery.TotalVolume,
+        totalWeight: delivery.TotalWeight,
+      };
+      clusters.push(newCluster);
+      delivery.cluster_id = newCluster.id;
     }
   }
   
@@ -642,7 +684,6 @@ async function createGeographicalClusters(deliveries) {
     lastClusterId: clusterIdCounter - 1,
   };
 }
-
 
 function splitCluster(cluster, startingClusterId) {
   console.log("Entered splitCluster");
@@ -924,33 +965,78 @@ function getDailyTravelDistance(truckModel) {
 }
 
 async function optimizeStopOrder(cluster) {
-  console.log("Entered optimizeStopOrder");
-  const destinationCoords = cluster.deliveries.map((delivery) => delivery.coordinates);
-
-  let currentStopIndex = 0;
-  const visited = new Set([currentStopIndex]);
-  const stopOrder = [currentStopIndex];
-
-  while (visited.size < destinationCoords.length) {
-    let nearestStopIndex = -1;
+  console.log("Entered optimizeStopOrder for cluster with", cluster.deliveries.length, "destinations");
+  
+  if (cluster.deliveries.length <= 1) {
+    cluster.deliveries[0].Stop_Order = 1;
+    return;
+  }
+  
+  // Create array of destination coordinates with delivery references
+  const destinations = cluster.deliveries.map((delivery, index) => ({
+    delivery,
+    coordinates: delivery.destinationCoordinates,
+    index
+  }));
+  
+  // Start from the destination closest to origin
+  let currentIndex = -1;
+  let minDistanceFromOrigin = Infinity;
+  
+  for (let i = 0; i < destinations.length; i++) {
+    const distance = await getRoadRouteDistance(
+      cluster.originCoordinates,
+      destinations[i].coordinates,
+      cluster.deliveries[0]["Origin Pincode"]
+    );
+    
+    const distanceValue = distance !== null ? 
+      distance : 
+      calculateDistance(cluster.originCoordinates, destinations[i].coordinates);
+    
+    if (distanceValue < minDistanceFromOrigin) {
+      minDistanceFromOrigin = distanceValue;
+      currentIndex = i;
+    }
+  }
+  
+  const visited = new Set([currentIndex]);
+  const stopOrder = [currentIndex];
+  
+  // Nearest neighbor algorithm for destinations
+  while (visited.size < destinations.length) {
+    let nearestIndex = -1;
     let minDistance = Infinity;
-
-    for (let i = 0; i < destinationCoords.length; i++) {
+    
+    for (let i = 0; i < destinations.length; i++) {
       if (visited.has(i)) continue;
-      const distance = calculateDistance(destinationCoords[currentStopIndex], destinationCoords[i]);
-      if (distance < minDistance) {
-        minDistance = distance;
-        nearestStopIndex = i;
+      
+      const distance = await getRoadRouteDistance(
+        destinations[currentIndex].coordinates,
+        destinations[i].coordinates,
+        cluster.deliveries[0]["Origin Pincode"]
+      );
+      
+      const distanceValue = distance !== null ? 
+        distance : 
+        calculateDistance(destinations[currentIndex].coordinates, destinations[i].coordinates);
+      
+      if (distanceValue < minDistance) {
+        minDistance = distanceValue;
+        nearestIndex = i;
       }
     }
-
-    visited.add(nearestStopIndex);
-    stopOrder.push(nearestStopIndex);
-    currentStopIndex = nearestStopIndex;
+    
+    if (nearestIndex !== -1) {
+      visited.add(nearestIndex);
+      stopOrder.push(nearestIndex);
+      currentIndex = nearestIndex;
+    }
   }
-
-  cluster.deliveries.forEach((delivery, index) => {
-    delivery.Stop_Order = stopOrder.indexOf(index) + 1;
+  
+  // Assign stop orders
+  stopOrder.forEach((destinationIndex, order) => {
+    destinations[destinationIndex].delivery.Stop_Order = order + 1;
   });
 }
 
@@ -1257,3 +1343,4 @@ app.get('/download-optimized-csv', async (req, res) => {
 app.listen(port, () => {
   console.log(`Server running on http://localhost:${port}`);
 });
+
